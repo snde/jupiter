@@ -1,0 +1,122 @@
+%pip install solana==0.18.0
+%pip install requests solana
+%pip install python-dotenv
+
+import requests
+import base64
+import os
+from solana.rpc.api import Client
+from solana.publickey import PublicKey
+from solana.keypair import Keypair
+from solana.transaction import Transaction
+#import bs58
+from dotenv import load_dotenv
+import json
+
+# 加载环境变量
+load_dotenv()
+
+# Solana RPC 客户端
+SOLANA_RPC_URL = "https://api.mainnet-beta.solana.com"
+client = Client(SOLANA_RPC_URL)
+
+# Jupiter API 端点
+JUPITER_API_URL = "https://quote-api.jup.ag/v6"
+
+# Token 合约地址
+sol_USDT = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"  # USDT
+sol_GRASS = "Grass7B4RdKfBCjTKgSqnXkqjwiGvQyFbuSCUJr3XXjs"  # GRASS
+
+# 从 .env 文件中加载私钥
+private_key = os.getenv("PRIVATE_KEY")
+pr = base64.b64decode(private_key)
+wallet = Keypair.from_secret_key(bytes(pr))
+public_key = wallet.public_key
+
+# 获取报价
+def get_quote():
+    params = {
+        "inputMint": sol_USDT,  # usdt
+        "outputMint": sol_GRASS,  # $grass
+        "amount": 10000000,  # 10 U
+        "autoSlippage": "true",
+        "autoSlippageCollisionUsdValue": 1000, #用1000U模拟滑点
+        "maxAutoSlippageBps": 300,  # 最大滑点3% 
+        "minimizeSlippage": "true", #优化路径和策略减少滑点
+    }
+
+    response = requests.get(f"{JUPITER_API_URL}/quote", params=params)
+    if response.status_code == 200:
+        return response.json()
+    else:
+        raise Exception(f"Error fetching quote: {response.text}")
+
+# 获取交换交易对象
+def get_swap_obj(quote):
+    swap_data = {
+        "swapRequest": {
+            "userPublicKey": public_key.to_base58(),
+            "dynamicComputeUnitLimit": True,
+            "prioritizationFeeLamports": "auto",
+            "quoteResponse": quote,
+
+        }
+    }
+    print(swap_data)
+    response = requests.post(f"{JUPITER_API_URL}/swap", json=swap_data)
+    if response.status_code == 200:
+        return response.json()
+    else:
+        raise Exception(f"Error fetching swap object: {response.text}")
+
+# 获取并打印报价
+def flow_quote():
+    quote = get_quote()
+    print("Quote data:", quote)
+
+# 获取报价并执行兑换
+def flow_quote_and_swap():
+    quote = get_quote()
+    print("Quote data:", quote)
+
+    swap_obj = get_swap_obj(quote)
+    print("Swap data:", swap_obj)
+
+    # 反序列化交易
+    swap_transaction_buf = base64.b64decode(swap_obj["swapTransaction"]["serialized"])
+    transaction = Transaction.deserialize(swap_transaction_buf)
+
+    # 签名交易
+    transaction.sign(wallet)
+
+    # 模拟交易
+    simulated_response = client.simulate_transaction(transaction)
+    if simulated_response["value"]["err"]:
+        print("Simulation failed:", simulated_response)
+        return
+
+    # 序列化并发送交易
+    serialized_transaction = transaction.serialize()
+    blockhash = transaction.message.recent_blockhash
+
+    # 提交交易并等待确认
+    tx_signature = client.send_transaction(transaction, wallet)
+    print(f"Transaction sent. Signature: {tx_signature}")
+    confirmation_response = client.confirm_transaction(tx_signature)
+    print(f"Transaction confirmed. Status: {confirmation_response}")
+
+    # 打印交易详情
+    print(f"Transaction details: https://solscan.io/tx/{tx_signature}")
+
+# 主函数，根据环境变量选择执行的流程
+def main():
+    flow_type = "quoteAndSwap"
+    if flow_type == "quote":
+        flow_quote()
+    elif flow_type == "quoteAndSwap":
+        flow_quote_and_swap()
+    else:
+        print("Please set the FLOW environment variable")
+
+if __name__ == "__main__":
+    main()
